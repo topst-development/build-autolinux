@@ -1,0 +1,33 @@
+# DESCRIPTIONS FOR TEMPLATE #
+
+#template/sdk.py
+
+SDK[doc] = "Dictionary type value of supported kinds of SDK"
+SOURCE_MIRROR[doc] = "Source mirrors path for symlinks"
+BUILDTOOL[doc] = "Yocto buildtool path for symlinks"
+
+#template/tcc805x_linux_ivi.py
+
+Machines[doc] = "A list of supported machines"
+Manifests[doc] = "A list of supported manifest xml"
+ManifestsURL[doc] = "A repository address of manifest to download"
+MainImages[doc] = "A list of supported images at main-core"
+SubImages[doc] = "A list of supported images at sub-core"
+MainBuildScript[doc] = "A script to build main-core"
+SubBuildScript[doc] = "A script to build sub-core"
+MainFeatures[doc] = "It is used when setting different from the defualt main-core feature."
+SubFeatures[doc] = "It is used when setting different from the defualt sub-core feature."
+
+# DESCRIPTIONS FOR FEATURE #
+
+#common
+
+gpu-vz[doc] = "GPU Virtualization"
+hud-display[doc] = "Enable display for HUD"
+kernel-5.4[doc] = "Set Kernel version to 5.4"
+network[doc] = "Install network packages"
+meta-micom[doc] = "Enable Micom Function"
+ssh-server-openssh[doc] = "Install openssh with network packages"
+support-4k-video[doc] = "Support 4k Video Contents"
+with-subcore[doc] = "Booting with sub-core"
+with-cr5[doc] = "Booting with cr5-core"

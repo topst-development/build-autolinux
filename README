@@ -1,0 +1,144 @@
+Autolinux
+=========
+
+Description
+-----------
+The AutoLinux was developed to make it easy to download and build the SDK.
+It does not provide all settings and functions, so you should refer to the Manual for detailed configurations.
+
+Cloning
+=======
+Set up build-autolinux by cloning its Git repository:
+
+     git clone ssh://git@github.com/topst-development/build-autolinux.git
+
+Prerequisites
+=============
+Before you can build, you will need set variable.
+If you already installed buildtools and downloaded source-mirror , you can save download time by setting some variables.
+
+    $ cd build-autolinux
+    $ vi template/sdk.py
+
+SOURCE_MIRROR = ''	#set your downloaded source mirror path
+BUILDTOOL = ''		#set your installed buildtools path
+
+Configuration
+=============
+To configure the build and to fetch the sources:
+
+    $ ./autolinux -c configure
+
+The configure sequence the following:
+(The step is activated only when there is at least one selectable case)
+	- Choose a SDK to download
+	- Choose a Manifest to download
+	- Choose a Machine to build
+	- Choose a Features to build
+
+When configure is finished, you can see the result.
+ex)
+	SDK=tcc8050_linux_ivi_tost
+	MANIFEST=tcc8050_linux_ivi_tost_0.1.0.xml
+	MACHINE=tcc8050-main
+	VERSION=dev
+	FEATURES=with-subcore
+
+Build
+=====
+Enter the command ‘build’ to start the build.
+The menu is activated only when there is at least one selectable case. The command ‘build is same to ‘bitbake’
+To kick off a full build of SDK, make sure you have at least 50GB of disk space available and enter the following:
+
+    $ ./autolinux -c build
+
+Create a build image the following path:
+	build/tcc8050-main/tmp/deploy/images/tcc8050-main/
+	build/tcc8050-sub/tmp/deploy/images/tcc8050-sub/
+	cr5-bsp/sources/build/tcc805x/
+	
+This may take in the neighborhood of two hours on a multi-core workstation with a fast disk subsystem and lots of memory,
+or many more hours on a laptop with less memory and slower disks or in a VM.
+
+If you need more information about the Autolinux, please enter '--help' option.
+
+Make Firmware Image
+===================
+Enter the command ‘make_fai’ to make SD Data.fai(for fwdn). This Command valid only main-core's image
+
+    $ ./autolinux -c make_fai
+
+Create a SD Data.fai the following path:
+	build/tcc8050-main/tmp/deploy/fwdn/
+
+FWDN 
+====
+Enter the command to download image at the following path: 
+	boot-firmware/tools/fwdn/
+
+	$ ./fwdn.sh
+
+Cleaning
+========
+The clean command is related to remove build history and cache data.
+
+	- default : move current built files to recycle directory. Recycle directory path : build/delete
+		$ ./autolinux -c clean
+
+	- old     : delete recycle directory.
+		$ ./autolinux -c clean old
+
+	- all     : Delete entire build directory including build history. Atfer clean all, rebuilding for the first time has a long build time.
+		$ ./autolinux -c clean all
+
+	- main     : Delete main core build directory including build history.
+		$ ./autolinux -c build main clean
+	
+	- sub     : Delete sub core build directory including build history.
+		$ ./autolinux -c build sub clean
+	
+	- cr5     : Delete cr5 core build directory including build history.
+		$ ./autolinux -c build cr5 clean
+
+Modify
+======
+The modify command modifies an already configured autolinux.config file.
+	Machine : modify machine. If machine changed, The select feature menu is automatically activated
+	Feature : modify feature
+	Sub-feature : modify sub-feature. For modify sub-feature to be possible, The feature must include a ‘with-subcore’.
+	Image : modify image. The menu is activated only when there is at least one selectable case.
+
+		$ ./autolinux -c modify (feature/sub-feature)
+
+Devtool
+=======
+Devtool is available in AutoLinux through devtool command.
+	$ ./autolinux -c devtool (devtool command)
+
+
+Copyright and License Information
+=================================
+/****************************************************************************************
+ *   FileName    : autolinux
+ *   Description : Yocto-based SDK automatic configuration python script
+ ****************************************************************************************
+ *
+ *   TCC Version 1.0
+ *   Copyright (c) Telechips Inc.
+ *   All rights reserved
+
+ This source code contains confidential information of Telechips.
+ Any unauthorized use without a written permission of Telechips including not limited
+ to re-distribution in source or binary form is strictly prohibited.
+ This source code is provided “AS IS” and nothing contained in this source code
+ shall constitute any express or implied warranty of any kind, including without limitation,
+ any warranty of merchantability, fitness for a particular purpose or non-infringement of any patent,
+ copyright or other third party intellectual property right.
+ No warranty is made, express or implied, regarding the information’s accuracy,
+ completeness, or performance.
+ In no event shall Telechips be liable for any claim, damages or other liability arising from,
+ out of or in connection with this source code or the use in the source code.
+ This source code is provided subject to the terms of a Mutual Non-Disclosure Agreement
+ between Telechips and Company.
+ *
+ ****************************************************************************************/
