@@ -1,0 +1,1534 @@
+#!/usr/bin/env python3
+
+#/****************************************************************************************
+# *   FileName    : autolinux
+# *   Description : Yocto-based SDK automatic configuration python script
+# ****************************************************************************************
+# *
+# *   TCC Version 1.0
+# *   Copyright (c) Telechips Inc.
+# *   All rights reserved
+#
+# This source code contains confidential information of Telechips.
+# Any unauthorized use without a written permission of Telechips including not limited
+# to re-distribution in source or binary form is strictly prohibited.
+# This source code is provided “AS IS” and nothing contained in this source code
+# shall constitute any express or implied warranty of any kind, including without limitation,
+# any warranty of merchantability, fitness for a particular purpose or non-infringement of any patent,
+# copyright or other third party intellectual property right.
+# No warranty is made, express or implied, regarding the information’s accuracy,
+# completeness, or performance.
+# In no event shall Telechips be liable for any claim, damages or other liability arising from,
+# out of or in connection with this source code or the use in the source code.
+# This source code is provided subject to the terms of a Mutual Non-Disclosure Agreement
+# between Telechips and Company.
+# *
+# ****************************************************************************************/
+
+import os
+import signal
+import sys
+import subprocess
+import shutil
+import argparse
+import multiprocessing
+import time
+import inspect
+
+from datetime import datetime
+from argparse import RawTextHelpFormatter
+from classes import feature
+
+__version__ = "0.8.5"
+
+DEVNULL = open(os.devnull, 'w')
+SDKs = dict()
+Buildtools = ''
+SourceMirrors = ''
+SstateCache = ''
+MainFuncs = []
+SubFuncs = []
+MainScript = ''
+SubScript = ''
+MANIFESTS_URL = ''
+SUPPORTED_MACHINES = []
+SUPPORTED_MANIFESTS = []
+IMGS = []
+Loglevel = False
+DownloadScript = "download_web.sh"
+doSstate = ''
+#DownloadScript = "download_ftp.sh"
+
+class colors:
+	HEADER    = '\033[95m'
+	MARGENTA  = '\033[35m'
+	BLUE      = '\033[34m'
+	YELLOW    = '\033[33m'
+	GREEN     = '\033[32m'
+	RED       = '\033[31m'
+	CYAN      = '\033[36m'
+	OKBLUE    = '\033[94m'
+	OKGREEN   = '\033[92m'
+	WARNING   = '\033[93m'
+	FAIL      = '\033[91m'
+	ENDC      = '\033[0m'
+	BOLD      = '\033[1m'
+	UNDERLINE = '\033[4m'
+	GRAYBG    = '\033[5m'
+
+deploy_images = '/boot-firmware/tools/fwdn/deploy-images'
+tcc8050_main_deploy = '/build/tcc8050-main/tmp/deploy'
+tcc8050_sub_deploy = '/build/tcc8050-sub/tmp/deploy'
+tcc8050_mcu_deploy = '/cr5-bsp/sources/build/tcc805x/gcc/tcc805x-freertos-debug'
+
+def debug(*msg):
+	if Loglevel:
+		print(inspect.stack()[1][1:4], end=' ')
+		print(msg)
+
+# initialise a directory stack
+pushstack = list()
+
+def pushdir(dirname):
+  global pushstack
+  pushstack.append(os.getcwd())
+  os.chdir(dirname)
+
+def popdir():
+  global pushstack
+  os.chdir(pushstack.pop())
+
+def getopt():
+	parser = argparse.ArgumentParser(description='Linux SDK Configurations', formatter_class=RawTextHelpFormatter)
+	general = parser.add_argument_group("General Command")
+	general.add_argument('-c', '--command', nargs='+', required=True,
+			help='General Command to use autolinux(required option)\n\n'\
+			'configure [option] [name]: setup the newer build environment\n'\
+			'     save [name] : save autolinux.config file to .config/\n'\
+			'     load [name] : load configure file from .config/\n\n'\
+			'clean [option]: move current built files to recycle directory. recycle dir:build/delete\n'\
+			'     old : delete current built files and recycle directory.\n\n'\
+			'     all : Delete entire build directory including build history. Atfer clean all, rebuilding for the first time has a long build time.\n\n'\
+			'build [option]: build SDK Image, choose the name of the image to build\n'\
+			'     \'args\'    : extra command strings \n'\
+			'                 Ex) autolinux -c build main \n'\
+   			'                 Ex) autolinux -c build main clean\n'\
+			'                 Ex) autolinux -c build \"linux-telechips -C compile\"\n'\
+			'                 Ex) autolinux -c build \"linux-telechips -C clean\"\n'\
+			'     sub \'args\': building on sub-core, available only when the with-subcore option is enabled\n'\
+			'                 Ex) autolinux -c build sub \n'\
+   			'                 Ex) autolinux -c build sub clean\n'\
+			'                 Ex) autolinux -c build sub \"linux-telechips -C compile\"\n'\
+			'                 Ex) autolinux -c build sub \"linux-telechips -C clean\"\n'\
+			'     cr5 \'args\': building on cr5-core, available only when the with-cr5core option is enabled\n'\
+			'                 Ex) autolinux -c build cr5 \n'\
+			'                 Ex) autolinux -c build cr5 clean\n\n'\
+			'devtool \'args\' : devtool package to develop easily\n'\
+			'                   Ex) autolinux -c devtool \'modify linux-telechips\'\n\n'\
+			'make_fai : make SDdata.fai for fwdn\n\n'\
+			'fwdn : firmware download\n\n'\
+			'info : show infomation of current configuration\'\n\n'\
+			'modify option: modify specific configure at current set-up\n'\
+			'     feature 		: modify features\n'\
+			'     sub-feature 	: modify subcore features\n'\
+			'     image 		: modify image\n')
+	general.add_argument('-V', '--version', action='version', version='%(prog)s {0}'.format(__version__),
+			help='print version and exit')
+
+	config = parser.add_argument_group("Configuration Options")
+	""""
+	config.add_argument('-s', '--sdk', type=str, default='',
+			help='enter the sdk to download \nsdk lists \nivi\t:{0}'\
+			.format(SDKs["ivi"]))
+	config.add_argument('-m', '--machine', type=str, default='',
+			help='enter the machine to build')
+	config.add_argument('-x', '--manifest', type=str, default='',
+			help='enter the manifest to build')
+	"""
+	config.add_argument('-f', '--features', nargs='+', dest='features',
+			help='enter the feature list\n'\
+			'ex) -f with-subcore gpu-vz meta-update')
+	config.add_argument('-sf', '--sub-features', nargs='+', dest='subfeatures',
+			help='enter the subfeature list\n'\
+			'ex) -sf rvc gpu-vz meta-update')
+
+	args = parser.parse_args()
+	return args
+
+def check_buildtool_env():
+	buildtool = "sysroots/x86_64-pokysdk-linux/usr/bin"
+	path = os.environ.get('PATH')
+	if buildtool in path:
+		p_tmp = path.split(':')
+		new_path = []
+		for p in p_tmp:
+			if p.find(buildtool) < 0 :
+				new_path.append(p)
+		path = ":".join(new_path)
+		os.environ['PATH'] = path
+
+def sel_machconfig(path):
+	clist = os.listdir(os.path.join(path, '.config/'))
+	m_sel = -1;
+	while m_sel not in list(range(1,len(clist)+1)):
+		print((colors.BOLD+"Choose a configure to load"+colors.ENDC))
+		m_cnt = 1;
+		for c in clist:
+			print(('  {0}.{1}'.format(m_cnt, c)))
+			m_cnt += 1;
+		try:
+			m_sel = eval(input("Select Config(1-"+str(len(clist))+"): "))
+		except KeyboardInterrupt:
+			sys.exit(0)
+		except:
+			pass
+
+	return clist[m_sel-1]
+
+def load_machconfig(path, mconf):
+	if os.path.isfile(path+'/.config/'+mconf):
+		src = path+'/.config/'+mconf
+		dst = path+'/autolinux.config'
+		os.system('cp '+ src + ' ' + dst)
+		print((colors.GREEN+"{0} load successful".format(mconf)+colors.ENDC))
+	else:
+		print((colors.WARNING+"{0} is not exist".format(mconf)+colors.ENDC))
+		sys.exit(1)
+
+def save_machconfig(path, name):
+	if not os.path.isdir(path+'/.config'):
+		os.system('mkdir '+path+'/.config')
+
+	src = path+'/autolinux.config'
+	dst = path+'/.config/'+name+'.config'
+	if os.path.isfile(dst):
+		print("{0} is overwritten".format(name+'.config'))
+
+	os.system('cp '+ src + ' ' + dst)
+	print((colors.GREEN+"{0} save successful".format(name+'.config')+colors.ENDC))
+
+def check_oldconfig(path, opts):
+	if 'configure' in opts.command and len(opts.command) < 2:
+		print((colors.WARNING+"The command is configure or Add configuration options(sdk,core,manifest) "+colors.ENDC))
+		return True
+	elif 'configure' in opts.command and 'load' in opts.command:
+		if os.path.isdir(os.path.join(path, '.config')):
+			if len(opts.command) < 3:
+				mconf = sel_machconfig(path)
+			else:
+				mconf = opts.command[2]
+			load_machconfig(path, mconf)
+		return False
+	else:
+		return False
+
+def read_config(path):
+	sys.path.append(os.path.join(path, 'template'))
+	if not os.path.isfile(os.path.join(path,'template/sdk.py')):
+		raise Exception("Error: Configuration file %s does not exist!" % os.path.join(path,'template/sdk.py'))
+
+	from sdk import SDK
+	global SDKs
+	SDKs = SDK
+
+	from sdk import BUILDTOOL
+	global Buildtools
+	Buildtools = BUILDTOOL
+
+	from sdk import SOURCE_MIRROR
+	global SourceMirrors
+	SourceMirrors = SOURCE_MIRROR
+
+	from sdk import SSTATE_CACHE
+	global SstateCache
+	SstateCache = SSTATE_CACHE
+
+def read_config_sdk(sdk, path):
+	sys.path.append(os.path.join(path, 'template'))
+	tmp = __import__(sdk)
+	#debug(sdk, path)
+
+	if not os.path.isfile(os.path.join(path, 'template/'+sdk+'.py')):
+		raise Exception("Error: SDK file %s does not exist!" % os.path.join(path, 'template/'+sdk+'.py'))
+
+	global MANIFESTS_URL
+	MANIFESTS_URL = tmp.ManifestsURL
+
+	global SUPPORTED_MACHINES
+	SUPPORTED_MACHINES = tmp.Machines
+
+	global SUPPORTED_MANIFESTS
+	SUPPORTED_MANIFESTS = tmp.Manifests
+
+	global MainFuncs
+	MainFuncs = tmp.MainFeatures
+
+	global SubFuncs
+	SubFuncs = tmp.SubFeatures
+
+	global MainScript
+	MainScript = tmp.MainBuildScript
+
+	global SubScript
+	SubScript = tmp.SubBuildScript
+
+	global IMGS
+	IMGS = tmp.MainImages + tmp.SubImages
+
+def sdk_repo(manifest):
+	debug("repo init -u " + MANIFESTS_URL + " -m " + manifest +" --depth=1")
+	subprocess.call("repo init -u " + MANIFESTS_URL + " -m " + manifest +" --depth=1", shell=True)
+	subprocess.call("repo sync -c -j16", shell=True)
+
+def download(path):
+	subprocess.call(path+"/poky/" + DownloadScript, shell=True)
+
+def download_sstate_cache(path):
+	subprocess.call(path+"/poky/" + DownloadScript + " sstateCache", shell=True)
+
+def download_ubuntu_filesystem(path):
+	subprocess.call(path+"/poky/" + DownloadScript + " ubuntu", shell=True)
+ 
+def install_buildtool(path):
+	if not os.path.isdir(os.path.join(path, 'tools')):
+		subprocess.call(path+"/poky/" + DownloadScript + " buildTools", shell=True)
+
+		if not os.path.isdir(os.path.join(path, 'buildtools')):
+			print((colors.YELLOW+"Install buildtools for CA72/CA53"+colors.ENDC))
+			#built = input('Do you want to build tools installer version 3.0 ? (y/n): ')
+			built = 'y'
+			if built == 'Y' or built == 'y':
+				install_dir = path+'/buildtools'
+				gv = subprocess.check_output('gcc -dumpversion', shell=True)
+				if int(gv.decode('utf8').split('.')[0]) >= 5:
+					bt = 'x86_64-buildtools-nativesdk-standalone-3.1.sh'
+				else:
+					bt = 'x86_64-buildtools-extended-nativesdk-standalone-3.0+snapshot-20200315.sh'
+				subprocess.call("yes | " + path+'/tools/'+bt+' -d '+install_dir, shell=True)
+			
+			# install CR5 build tool
+			print((colors.YELLOW+"Install buildtools for CR5"+colors.ENDC))
+			if not os.path.isdir(os.path.join(path,'buildtools/gcc-linaro-7.2.1-2017.11-x86_64_arm-eabi')):
+				subprocess.call('tar -xvf '+path+'/tools/gcc-linaro-7.2.1-2017.11-x86_64_arm-eabi.tar.xz -C ' + path+'/buildtools', shell=True)
+				
+				# set path 
+				debug(os.path.join(path,'cr5-bsp'))
+				if os.path.isdir(os.path.join(path,'cr5-bsp')):
+					print((colors.YELLOW+"Configure gcc tool path for CR5"+colors.ENDC))
+					write_CR5(os.path.join(path,'cr5-bsp/sources/build/tcc805x/gcc/Makefile'), path)
+				
+			return currdir+'/buildtools'
+
+def sel_sdk(path):
+	platforms = sorted(SDKs.items())
+
+	if len(SDKs) > 1:
+		m_sel = -1;
+		v_sel = -1;
+		while m_sel not in list(range(1,len(platforms)+1)):
+			print((colors.BOLD+"Choose the Platform"+colors.ENDC))
+			m_cnt = 1;
+			for key in platforms:
+				print(('  {0}.{1}'.format(m_cnt, key[0])))
+				m_cnt += 1;
+			try:
+				m_sel = eval(input("Select SDK(1-"+str(len(platforms))+"): "))
+			except KeyboardInterrupt:
+				sys.exit(0)
+			except:
+				pass
+
+		if len(platforms[m_sel-1][1]) > 1:
+			while v_sel not in list(range(1,len(platforms[m_sel-1][1])+1)):
+				print((colors.BOLD+"Choose the SDK to download"+colors.ENDC))
+				v_cnt = 1;
+				for value in platforms[m_sel-1][1]:
+					print(('  {0}.{1}'.format(v_cnt, value)))
+					v_cnt += 1;
+				try:
+					v_sel = eval(input("Select SDK(1-"+str(len(platforms[m_sel-1][1]))+"): "))
+				except KeyboardInterrupt:
+					sys.exit(0)
+				except:
+					pass
+		else:
+			v_sel = 1
+
+		read_config_sdk(platforms[m_sel-1][1][v_sel-1], path)
+		return platforms[m_sel-1][1][v_sel-1]
+	else:
+		v_sel = -1;
+		if len(platforms[0][1]) > 1:
+			while v_sel not in list(range(1,len(platforms[0][1])+1)):
+				print((colors.BOLD+"Choose the SDK to download"+colors.ENDC))
+				v_cnt = 1;
+				for value in platforms[0][1]:
+					print(('  {0}.{1}'.format(v_cnt, value)))
+					v_cnt += 1;
+				try:
+					v_sel = eval(input("Select SDK(1-"+str(len(platforms[0][1]))+"): "))
+				except KeyboardInterrupt:
+					sys.exit(0)
+				except:
+					pass
+			read_config_sdk(platforms[0][1][v_sel-1], path)
+			return platforms[0][1][v_sel-1]
+		else:
+			keys = list(SDKs.keys())
+			read_config_sdk(SDKs[keys[0]][0], path)
+			return SDKs[keys[0]][0]
+
+def sel_manifest():
+	if len(SUPPORTED_MANIFESTS) > 1:
+		m_sel = -1;
+		while m_sel not in list(range(1,len(SUPPORTED_MANIFESTS)+1)):
+			print((colors.BOLD+"Choose a Manifest to repo"+colors.ENDC))
+			m_cnt = 1;
+			for xml, date in SUPPORTED_MANIFESTS:
+				print(('  {0}.{1}'.format(m_cnt, xml)))
+				m_cnt += 1;
+			try:
+				m_sel = eval(input("Choose Manifest(1-"+str(len(SUPPORTED_MANIFESTS))+"): "))
+			except KeyboardInterrupt:
+				sys.exit(0)
+			except:
+				pass
+
+		return SUPPORTED_MANIFESTS[m_sel-1]
+	else:
+		return SUPPORTED_MANIFESTS[0]
+
+def sel_machine():
+	if len(SUPPORTED_MACHINES) > 1:
+		m_sel = -1;
+		while m_sel not in list(range(1,len(SUPPORTED_MACHINES)+1)):
+			print((colors.BOLD+"Choose a core to build"+colors.ENDC))
+			m_cnt = 1
+			for mach in SUPPORTED_MACHINES:
+				if "tcc8050-cr5" == mach:
+					cr5_count = 1;
+					pass
+				else:
+					print(('  {0}.{1}'.format(m_cnt, mach)))
+					m_cnt += 1
+			try:
+				m_sel = eval(input("Choose core(1-"+str(len(SUPPORTED_MACHINES)-cr5_count)+"): "))
+			except KeyboardInterrupt:
+				sys.exit(0)
+			except:
+				pass
+
+		return SUPPORTED_MACHINES[m_sel-1]
+	else:
+		return SUPPORTED_MACHINES[0]
+
+
+def sel_feature(m, feature, core):
+	m_sel = -1
+	debug(m, feature, core)
+	while m_sel != 0:
+		fs = feature.getFeatureList(core)
+		debug(">>>", m_sel, m, feature, core, fs)
+		print((colors.BOLD+"Choose the Features at "+m+colors.ENDC))
+		for idx, f in enumerate(fs):
+			#debug(idx, f)
+			if f[1] == True:
+				sys.stdout.write('*')
+			else:
+				sys.stdout.write(' ')
+			#strFormat = ' %-3s %-20s'+colors.GRAYBG+'%-40s'+colors.ENDC
+			strFormat = ' %-3s %-20s' + '%-40s' + colors.ENDC
+			print(strFormat % (str(idx+1)+'.', f[0], f[2]))
+		print('  0.Exit')
+		try:
+			m_sels = input("Choose Features enable/disable (1-{0}): ".format(len(fs)))
+			if '*' == m_sels:
+				for f in fs:
+					feature.enableFeature(core, f[0])
+			else:
+				if ',' in m_sels:
+					mlists = m_sels.split(',')
+				else:
+					mlists = [m_sels]
+
+				debug(core, mlists)
+
+				nlists = []
+				for mlist in mlists:
+					if '-' in str(mlist):
+						new = list(range(int(mlist.split('-')[0]), int(mlist.split('-')[1])+1))
+						nlists = nlists + new
+
+				if not len(nlists) == 0:
+					mlists = nlists
+				map_lists = list(map(int, mlists))
+				mlists = list(map_lists)
+
+				debug(core, mlists)
+				for mlist in mlists:
+					if not mlist == 0:
+						if fs[mlist-1][1]:
+							feature.disableFeature(core, fs[mlist-1][0])
+						else:
+							feature.enableFeature(core, fs[mlist-1][0])
+						m_sel = -1
+					else:
+						m_sel = 0
+		except KeyboardInterrupt:
+			sys.exit(0)
+		except:
+			pass
+
+def sel_image(path, m, sdk):
+	template = os.path.join(path, 'template')
+	sys.path.append(template)
+	tmp = __import__(sdk)
+	if not os.path.isfile(os.path.join(template, sdk+'.py')):
+		raise Exception("Error: SDK file %s does not exist!" % os.path.join(template, sdk+'.py'))
+
+	core = m.split("-")[1]
+	if sdk.split('_')[1] == 'linux':
+		if core != 'sub':
+			imgs = tmp.MainImages
+
+	if sdk.split('_')[2] == 'ivi':
+		if core == 'sub':
+			imgs = tmp.SubImages
+
+	if len(imgs) > 1:
+		print ("Choose a Image to build")
+		m_sel = -1
+		while m_sel not in list(range(1, len(imgs)+1)):
+			m_cnt = 1;
+
+			for img in imgs:
+				print(('  {0}.{1}'.format(m_cnt, img)))
+				m_cnt += 1;
+			try:
+				m_sel = eval(input("Choose Image (1-"+str(len(imgs))+"): "))
+			except KeyboardInterrupt:
+				sys.exit(0)
+			except:
+				pass
+
+		return imgs[m_sel-1]
+	else:
+		return imgs[0]
+
+def read_config_history(f, path, opt='all'):
+	if os.path.isfile(os.path.join(path, 'autolinux.config')):
+		print((colors.BOLD+"Read configuration from autolinux.config\n"+colors.ENDC))
+		data = {'sdk':'', 'manifest':'', 'sdkdate':'', 'mach':'', 'buildver':'', 'feature':[], 'subfeature':[], 'image':''}
+		with open(os.path.join(path, f), 'r') as f:
+			lines = f.read()
+			data['sdk'] = lines.split('\n')[0].split('=')[1]
+			data['manifest'] = lines.split('\n')[1].split('=')[1]
+			if len(lines.split('\n')) > 8:
+				data['sdkdate'] = lines.split('\n')[2].split('=')[1]
+				data['mach'] = lines.split('\n')[3].split('=')[1]
+				data['buildver'] = lines.split('\n')[4].split('=')[1]
+				data['feature'] = lines.split('\n')[5].split('=')[1].split(',')
+				data['subfeature'] = lines.split('\n')[6].split('=')[1].split(',')
+				data['image'] = lines.split('\n')[7].split('=')[1]
+			else:
+				print(colors.WARNING+'autolinux.config is old version. you need to re-configuration.'+colors.ENDC)
+				data['sdkdate'] = 'up-to-date'
+				data['mach'] = lines.split('\n')[2].split('=')[1]
+				data['buildver'] = lines.split('\n')[3].split('=')[1]
+				data['feature'] = lines.split('\n')[4].split('=')[1].split(',')
+				data['subfeature'] = lines.split('\n')[5].split('=')[1].split(',')
+				data['image'] = lines.split('\n')[6].split('=')[1]
+
+		if opt == 'wof':
+			return data
+		else:
+			read_config_sdk(data['sdk'], path)
+			chip = data['mach'][0:6]
+
+			if 'sub' in data['mach']:
+				data['subfeature'] = data['feature']
+
+			mainfeatures = []
+			subfeatures = []
+			for f in data['feature']:
+				mainfeatures.append([f,True])
+				if 'sub' in data['mach']:
+					subfeatures.append([f,True])
+			if 'with-subcore' in data['feature']:
+				for f in data['subfeature']:
+					subfeatures.append([f,True])
+
+			if 'sub' in data['mach']:
+				subfeatures = mainfeatures
+
+			features = feature.Feature(data['mach'][0:6]+'x', data['sdkdate'], data['sdk'].split('_')[2], mainfeatures, subfeatures, False, False)
+
+		return data['sdk'], data['manifest'], data['mach'], data['buildver'], features, data['image']
+	else:
+		print(colors.WARNING+'autolinux.config is not exist. you need to set up the configuration first.'+colors.ENDC)
+		sys.exit(1)
+
+def write_config_history(sdk, xml, date, mach, v, features, subfs):
+	with open('autolinux.config', 'w+') as f:
+		f.write('SDK='+sdk+'\n')
+		f.write('MANIFEST='+xml+'\n')
+		f.write('DATE='+date+'\n')
+		f.write('MACHINE='+mach+'\n')
+		f.write('VERSION='+v+'\n')
+		f.write('FEATURES='+",".join(features)+'\n')
+		f.write('SUBFEATURES='+",".join(subfs)+'\n')
+		f.write('IMAGE=\n')
+
+def modify_config_history(config, context):
+	with open('autolinux.config', 'r') as f:
+		lines = f.readlines()
+	if config == 'sdk':
+		lines[0] = 'SDK='+context+'\n'
+	elif config == 'manifest':
+		lines[1] = 'MANIFEST='+context+'\n'
+	elif config == 'mach':
+		lines[3] = 'MACHINE='+context+'\n'
+	elif config == 'buildver':
+		lines[4] = 'VERSION='+context+'\n'
+	elif config == 'feature':
+		lines[5] = 'FEATURES='+",".join(context)+'\n'
+	elif config == 'subfeature':
+		lines[6] = 'SUBFEATURES='+",".join(context)+'\n'
+	elif config == 'image':
+		lines[7] = 'IMAGE='+context+'\n'
+	else:
+	 	print((config + ' is not invalid'))
+
+	with open('autolinux.config', 'w+') as f:
+		for line in lines:
+			f.write(line)
+
+def check_builddir(path, m):
+	confdir = path+"/build/"+m+"/conf"
+	if os.path.isdir(confdir):
+		print((colors.WARNING+"The conf directory is already exists. \nIf you want to create newer conf, please use the -c --confiure option\n"+colors.ENDC))
+
+def write_local(loconf, bv, path, core, chip, br):
+	with open(loconf, 'r') as f:
+		lines = f.readlines()
+
+	with open(loconf, 'w') as f:
+		for line in lines:
+			flush = False
+			if 'DL_DIR' in line and 'TOPDIR' in line:
+				f.write(line.replace(line.split()[2], '"'+(os.path.join(path, 'build/downloads'))+'"'))
+				flush = True
+			if 'SSTATE_DIR' in line and 'TOPDIR' in line:
+				if bv == 'release':
+					sscdir = 'build/sstate-cache-rel'
+				else:
+					sscdir = 'build/sstate-cache-dev'
+
+				line = line.replace(line, line[1:])
+
+				debug(line.replace(line.split()[2], '"'+(os.path.join(path, sscdir))+'"'))
+				f.write(line.replace(line.split()[2], '"'+(os.path.join(path, sscdir))+'"'))
+				flush = True
+
+			if not flush:
+				f.write(line)
+
+def write_CR5(file, path):
+	with open(file, 'r') as f:
+		lines = f.readlines()
+
+	with open(file, 'w') as f:
+		flush = False
+		for line in lines:
+			if 'MCU_BSP_TOOLCHAIN_PATH' in line:
+				if not flush:
+					debug(line.split()[2], os.path.join(path, 'buildtools/gcc-linaro-7.2.1-2017.11-x86_64_arm-eabi'))
+					f.write(line.replace(line.split()[2], os.path.join(path, 'buildtools/gcc-linaro-7.2.1-2017.11-x86_64_arm-eabi')))
+					flush = True
+					continue
+			f.write(line)
+		f.close()
+
+
+def check_subcore(m, flist):
+	subm_list = []
+	sub = ''
+	debug(m, flist, SUPPORTED_MACHINES)
+	for supported_m in SUPPORTED_MACHINES:
+		if 'sub' in supported_m:
+			subm_list.append(supported_m)
+
+	debug(subm_list)
+	if 'main' in m:
+		if 'with-subcore' in flist:
+			debug(flist, len(subm_list))
+
+			if len(subm_list) > 1:
+				subm = m.split('-')
+				subm[1] = 'sub'
+				subm = "-".join(subm)
+				if subm in subm_list:
+					sub = subm
+			else:
+				sub = subm_list[0]
+		else:
+			sub = ''
+	debug(sub)
+	return sub
+
+def check_cr5core(m, flist):
+	subm_list = []
+	sub = ''
+	debug(m, flist, SUPPORTED_MACHINES)
+	for supported_m in SUPPORTED_MACHINES:
+		if 'cr5' in supported_m:
+			subm_list.append(supported_m)
+
+	debug(subm_list)
+	if 'main' in m:
+		if 'with-cr5core' in flist:
+			debug(flist, len(subm_list))
+
+			if len(subm_list) > 1:
+				subm = m.split('-')
+				subm[1] = 'sub'
+				subm = "-".join(subm)
+				if subm in subm_list:
+					sub = subm
+			else:
+				sub = subm_list[0]
+		else:
+			sub = ''
+
+	debug(sub)
+	return sub
+
+def modify_confs(path, m, features, bv, sdk, br='sv1.0'):
+	chip = m.split('-')[0]
+	core = m.split('-')[1]
+	loconf = os.path.join(path, 'build/'+m+'/conf/local.conf')
+
+	features.write_feature(path, '/poky/meta-telechips/', m, core, bv, sdk)
+
+	debug(loconf, bv, path, core, chip, br)
+	write_local(loconf, bv, path, core, chip, br)
+
+	ret = check_subcore(m, features.getEnableFeatureList(core))
+
+	return ret
+
+def mk_builddir(path, m, v, bt):
+	check_builddir(path, m)
+	debug(bt)
+	if bt:
+		bt = bt+'/environment-setup-x86_64-pokysdk-linux'
+	else:
+		bt = '/environment-setup-x86_64-pokysdk-linux'
+		
+	debug(bt)
+
+	core = m.split("-")[1]
+	bs = ""
+	if core == "sub":
+		bs = os.path.join(path, SubScript)
+	else:
+		bs = os.path.join(path, MainScript)
+
+	mkcmd = bs+" "+m
+	os.system(path+'/script/build_configure.sh '+bt+' '+mkcmd)
+	debug(path+'/script/build_configure.sh '+bt+' '+mkcmd)
+
+def exec_build(path, m, bt, cmd, log=True):
+	script = os.path.join(path, 'poky')
+	if bt:
+		bt = bt+'/environment-setup-x86_64-pokysdk-linux'
+	else:
+		bt = '/environment-setup-x86_64-pokysdk-linux'
+		
+	bcmd = bt +' '+ script +' '+ m +' '+cmd
+	scmd = path+'/script/build_image.sh '+bcmd
+	debug(bcmd, scmd)
+
+	if log:
+		proc = subprocess.Popen(scmd.split(), shell=False, stderr=subprocess.STDOUT, universal_newlines=True)
+	else:
+		proc = subprocess.call(scmd, shell=True, stdout=DEVNULL)
+	return proc
+
+def exec_build_cr5(path, cmd, log=True):
+	scmd = path+'/script/build_cr5.sh '+cmd
+
+	if log:
+		proc = subprocess.Popen(scmd.split(), shell=False, stderr=subprocess.STDOUT, universal_newlines=True)
+	else:
+		proc = subprocess.call(scmd, shell=True, stdout=DEVNULL)
+	return proc
+
+def exec_devtool(path, m, bt, cmd, log=True):
+	script = os.path.join(path, 'poky')
+	if bt:
+		bt = bt+'/environment-setup-x86_64-pokysdk-linux'
+	else:
+		bt = '/environment-setup-x86_64-pokysdk-linux'
+		
+	dcmd = bt +' '+ script +' '+ m +' '+cmd
+	if log:
+		subprocess.call(path+'/script/devtool.sh '+dcmd, shell=True)
+	else:
+		subprocess.call(path+'/script/devtool.sh '+dcmd, shell=True, stdout=DEVNULL)
+
+def move_oldbuild(path):
+	config = read_config_history('autolinux.config', path, opt='wof')
+	oldmach = config['mach']
+	oldfeatures = config['feature']
+	if not os.path.isdir(path+'/build/delete'):
+		os.system('mkdir '+path+'/build/delete')
+
+	flist = subprocess.check_output('ls '+path+'/build/delete', shell=True)
+	if not flist :
+		dpath = path+'/build/delete/0'
+		os.system('mkdir '+dpath)
+		fnext = 0
+	else:
+		flist = flist.split(b'\n')
+		del flist[-1]
+		flist = [int(f) for f in flist]
+		flist = sorted(flist)
+		fnext = flist[-1]+1
+		dpath = path+'/build/delete/'+str(fnext)
+		os.system('mkdir '+ dpath)
+
+	oldmpath = path+'/build/'+oldmach+'/'
+	oldsubmpath = ''
+	if 'with-subcore' in oldfeatures:
+		oldsubmpath = path+'/build/'+oldmach.replace('main','sub')+'/'
+	print('deleted target : \n\tCA72: {0}\n\tCA53: {1}'.format(oldmpath, oldsubmpath))
+	oldhis = ['tmp', 'cache', 'buildhistory']
+	for old in oldhis:
+		subprocess.call('mv '+oldmpath+old+' '+dpath+'/'+oldmach, shell=True, stderr=DEVNULL)
+		if oldsubmpath :
+			subprocess.call('mv '+oldsubmpath+old+' '+dpath+'/'+oldmach.replace('main','sub'), shell=True, stderr=DEVNULL)
+
+	# Clean CR5
+	if 'with-cr5core' in oldfeatures:
+		exec_build_cr5(path, 'clean', False)
+		print('\tCR5: '+path+tcc8050_mcu_deploy)
+
+	# remove deploy fwdn path
+	if os.path.isdir(path + '/boot-firmware/tools/fwdn'):
+		os.system('rm -f ' + path + deploy_images)
+		print('\tFWDN tool path: ' + path + deploy_images)
+
+	return fnext
+
+def setup_configuration(options, path):
+	bv = 'release'
+	print((colors.GREEN+"Configure Start\n"+colors.ENDC))
+
+	"""
+	if options.sdk:
+		print(">>>>>> 1111111111")
+		sdk = options.sdk
+		if sdk not in SDKs["ivi"] and sdk not in SDKs["cluster"] and sdk not in SDKs["dvrs"] and sdk not in SDKs["subcore"]:
+			print((colors.RED+'SDKs {0} is not supported'.format(sdk)+colors.ENDC))
+			sys.exit(1)
+	else:
+	"""
+	sdk = sel_sdk(path)
+
+	"""
+	if options.manifest:
+		debug("")
+		supported_manifests = []
+		for xml, date in SUPPORTED_MANIFESTS:
+			supported_manifests.append(xml)
+			if options.manifest == xml:
+				manifest = [xml, date]
+		if options.manifest not in supported_manifests:
+			print((colors.RED+'MANIFEST {0} is not supported'.format(manifest)+colors.ENDC))
+			sys.exit(1)
+	else:
+	"""
+	manifest = sel_manifest()
+
+	"""
+	if options.machine:
+		debug("")
+		mach = options.machine
+		if mach not in SUPPORTED_MACHINES:
+			print((colors.RED+'MACHINE {0} is not supported'.format(mach)+colors.ENDC))
+			sys.exit(1)
+	else:
+	"""
+	mach = sel_machine()
+
+	chipset = mach[0:6]+'x'
+	if len(mach.split('-')) > 1 :
+		core = mach.split('-')[1]
+	else:
+		core = ''
+	features = []
+
+	#debug(options.features)
+	if options.features:
+		fs = []
+		options.features = ",".join(options.features)
+		tmpMainFeatures = options.features
+
+		for fn in options.features.split(','):
+			fs.append([fn, True])
+		if core == 'sub':
+			features = feature.Feature(chipset, manifest[1], sdk.split('_')[2], [], fs, False, False)
+		else:
+			global MainFuncs
+			MainFuncs = fs
+			if 'with-subcore' not in options.features:
+				features = feature.Feature(chipset, manifest[1], sdk.split('_')[2], fs, [], False)
+	else:
+		debug(chipset, manifest[1], sdk.split('_')[2], MainFuncs, SubFuncs)
+		features = feature.Feature(chipset, manifest[1], sdk.split('_')[2], MainFuncs, SubFuncs)
+		debug(mach, features, core)
+		sel_feature(mach, features, core)
+		debug(core)
+		tmpMainFeatures = features.getEnableFeatureList(core)
+
+	if 'with-subcore' in tmpMainFeatures:
+		subfs = []
+		loadmain = True
+		if options.subfeatures:
+			options.subfeatures = ",".join(options.subfeatures)
+			for fn in options.subfeatures.split(','):
+
+				subfs.append([fn, True])
+			if options.features:
+				loadmain = False
+			features = feature.Feature(chipset, manifest[1], sdk.split('_')[2], MainFuncs, subfs, loadmain, False)
+		else:
+			if not features:
+				features = feature.Feature(chipset, manifest[1], sdk.split('_')[2], MainFuncs, SubFuncs, False)
+			subm = mach.split('-')
+			subm[1] = 'sub'
+			subm = "-".join(subm)
+			debug("")
+			sel_feature(subm, features, 'sub')
+	else:
+		subfs = []
+
+	# CR5
+	if 'with-cr5core' in tmpMainFeatures:
+		debug(core)
+		'''
+		subfs = []
+		loadmain = True
+		if options.subfeatures:
+			options.subfeatures = ",".join(options.subfeatures)
+			for fn in options.subfeatures.split(','):
+
+				subfs.append([fn, True])
+			if options.features:
+				loadmain = False
+			features = feature.Feature(chipset, manifest[1], sdk.split('_')[2], MainFuncs, subfs, loadmain, False)
+		else:
+			if not features:
+				features = feature.Feature(chipset, manifest[1], sdk.split('_')[2], MainFuncs, SubFuncs, False)
+			subm = mach.split('-')
+			subm[1] = 'sub'
+			subm = "-".join(subm)
+			debug("")
+			sel_feature(subm, features, 'sub')
+		'''
+	else:
+		subfs = []
+
+	if os.path.isfile(os.path.join(path, 'autolinux.config')):
+		debug("")
+		oldconfig = read_config_history('autolinux.config', path, opt='wof')
+		oldmanifest = oldconfig['manifest']
+
+		if not 'android' in sdk and oldmanifest != manifest[0]:
+			debug("")
+			print((colors.BOLD+"\n The manifest.xml changed auto update Start!\n"+colors.ENDC))
+			sdk_repo(manifest[0])
+
+		os.remove(os.path.join(path, 'autolinux.config'))
+
+	write_config_history(sdk, manifest[0], manifest[1], mach, bv, features.getEnableFeatureList(core), features.getEnableFeatureList('sub'))
+	debug(sdk, manifest[0], mach, bv, features)
+	return sdk, manifest[0], mach, bv, features
+
+def setup_environment(path, sdk, manifest):
+	global Buildtools
+
+	#How can I turn off git SSL verification?
+	#export GIT_SSL_NO_VERIFY=1
+
+	# poky
+	if not os.path.isdir(os.path.join(path, 'poky')):
+		debug("")
+		if not 'android' in sdk:
+			debug("")
+			sdk_repo(manifest)
+		else:
+			print((colors.WARNING+'The Update does not supported in Android Subcore'+colors.ENDC))
+			sys.exit(0)
+	
+	# sstate y/n
+	if 'configure' in options.command:
+		doSstate = input('Do you want to use sstate? (y/n) : ')
+	else:
+		doSstate = ''
+
+	# Source Mirrors
+	"""
+	if not os.path.isdir(SourceMirrors):
+		debug("")
+		if not os.path.isdir(path+'/source-mirror'):
+			debug("")
+			download(path)
+	else:
+		debug("")
+		if SourceMirrors != path+'/source-mirror':
+			debug("")
+			subprocess.call('ln -sf '+SourceMirrors+' '+path+'/source-mirror', shell=True)
+
+		with open(os.path.join(path, 'template/sdk.py'), 'r') as f:
+			debug("")
+			lines = f.readlines()
+		with open(os.path.join(path, 'template/sdk.py'), 'w') as f:
+			debug("")
+			for line in lines:
+				if 'SOURCE_MIRROR' in line:
+					f.write(line.replace(line.split()[2], '\'\''))
+				else:
+					f.write(line)
+	"""
+
+
+	# Buildtools
+	debug("Buildtools", Buildtools)
+	if not os.path.isdir(Buildtools):
+		debug(os.path.isdir(os.path.join(path, 'buildtools')))
+		if not os.path.isdir(os.path.join(path, 'buildtools')):
+			Buildtools = install_buildtool(path)
+		else:
+			Buildtools = os.path.join(path, 'buildtools')
+	else:
+		if Buildtools != path+'/buildtools':
+			subprocess.call('ln -sf '+Buildtools+' '+path+'/buildtools', shell=True)
+		with open(os.path.join(path, 'template/sdk.py'), 'r') as f:
+			lines = f.readlines()
+		with open(os.path.join(path, 'template/sdk.py'), 'w') as f:
+			for line in lines:
+				if 'BUILDTOOL' in line:
+					f.write(line.replace(line.split()[2], '\'\''))
+				else:
+					f.write(line)
+
+
+	#ubuntu filesystem
+	if not os.path.isfile(path+'/ubuntu-filesystem/rootfs.tar.gz'):
+		download_ubuntu_filesystem(path)
+
+	if doSstate == 'y':
+		# sstate cache rel
+		debug(SstateCache)
+		if not os.path.isdir(SstateCache):
+			debug("")
+			if not os.path.isdir(path+'/build/sstate-cache-rel'):
+				debug("")
+				download_sstate_cache(path)
+	else:
+		pass
+
+def print_config_info(path, sub=False):
+	with open('autolinux.config', 'r') as f:
+		lines = f.readlines()
+	print("================================================================================="+colors.OKGREEN)
+	for line in lines:
+		if not line.split('=')[1] == '\n':
+			if not 'SUBFEATURES' in line:
+				sys.stdout.write(line)
+			elif 'SUBFEATURES' in line and sub:
+				sys.stdout.write(line)
+	print(colors.ENDC+"=================================================================================")
+
+def command_clean(cmd, path):
+	debug(cmd)
+	if len(cmd) < 2:
+		if os.path.isfile(os.path.join(path, 'autolinux.config')):
+			delnum = move_oldbuild(path)
+			print(colors.WARNING+"move current built files(CA72,CA53). recycle dir:build/delete/{}\n".format(delnum)+colors.ENDC)
+		else:
+			print(colors.WARNING+"autolinux.config does not exist\n"+colors.ENDC)
+	else:
+		if cmd[1] == 'old':
+			if os.path.isdir(path+'/build/delete'):
+				print((colors.WARNING+"delete recycle directory in background.\n"+colors.ENDC))
+				os.system('mv '+path+'/build/delete '+path+'/build/temp')
+				os.system('rm -rf '+path+'/build/temp&')
+			else:
+				print((colors.WARNING+"delete directory does not exist\n"+colors.ENDC))
+		elif cmd[1] == 'main':
+			# Clean main
+			if os.path.isdir(path+'/build/tcc8050-main'):
+				print((colors.WARNING+"delete tcc8050-main build directory. It takes a long time in background!!\n"+colors.ENDC))
+				os.system('rm -rf '+path+'/build/tcc8050-main/tmp')
+				os.system('rm -rf '+path+'/build/tcc8050-main/cache')
+				os.system('rm -rf '+path+'/build/tcc8050-main/buildhistory')
+				if os.path.isdir(currdir + deploy_images + '/tcc8050-main'):
+					os.system('rm -rf '+ currdir + deploy_images + '/tcc8050-main')
+			else:
+				print((colors.WARNING + "delete tcc8050-main directory does not exist\n" + colors.ENDC))
+		elif cmd[1] == 'sub':
+			# Clean sub
+			if os.path.isdir(path+'/build/tcc8050-sub'):
+				print((colors.WARNING+"delete tcc8050-sub build directory. It takes a long time in background!!\n"+colors.ENDC))
+				os.system('rm -rf '+path+'/build/tcc8050-sub/tmp')
+				os.system('rm -rf '+path+'/build/tcc8050-sub/cache')
+				os.system('rm -rf '+path+'/build/tcc8050-sub/buildhistory')
+				if os.path.isdir(currdir + deploy_images + '/tcc8050-sub'):
+					os.system('rm -rf '+ currdir + deploy_images + '/tcc8050-sub')    
+			else:
+				print((colors.WARNING + "delete tcc8050-sub directory does not exist\n" + colors.ENDC))
+		elif cmd[1] == 'cr5':
+			# Clean CR5
+			if os.path.isdir(path+tcc8050_mcu_deploy):
+				exec_build_cr5(path, 'clean', False)
+				os.system('rm -rf ' + deploy_images + '/cr5_snor.rom')    
+				if os.path.isdir(currdir + deploy_images + '/cr5_snor.rom'):
+					os.system('rm -rf '+ currdir + deploy_images + '/cr5_snor.rom')
+				print('\tDelete path : ' + path + tcc8050_mcu_deploy)
+			else:
+				print((colors.WARNING + "delete directory does not exist\n" + colors.ENDC))
+		elif cmd[1] == 'all':
+			if os.path.isdir(path+'/build'):
+				print((colors.WARNING+"delete total build directory. It takes a long time in background!!\n"+colors.ENDC))
+				os.system('mv '+path+'/build '+path+'/temp')
+				os.system('rm -rf '+path+'/temp&')
+				os.system('rm -rf '+path+'/autolinux.config')    
+				if os.path.isdir(currdir + deploy_images):
+					os.system('rm -rf '+ currdir + deploy_images)
+			else:
+				print((colors.WARNING+"built directory are not exist\n"+colors.ENDC))
+
+def command_build(cmd, path, mach, sdk, image):
+	debug(cmd)
+	if os.path.isdir(path+'/build/tcc8050-main'):
+		os.system('rm -rf '+path+'/build/tcc8050-main/bitbake*')
+
+	if os.path.isdir(path+'/build/tcc8050-sub'):
+		os.system('rm -rf '+path+'/build/tcc8050-sub/bitbake*')
+
+	if len(cmd) < 2:
+		image = sel_image(path, mach, sdk)
+		if image in IMGS:
+			modify_config_history('image', image)
+		buildcmd = image
+	else:
+		if cmd[1] == 'main':
+			buildm = 'tcc8050-main'
+
+			if len(cmd) == 2:
+				buildcmd = 'automotive-linux-platform-image'
+			else:
+				buildcmd = " ".join(cmd[2:])
+			try:
+				debug(path, buildm, Buildtools, buildcmd)
+				proc = exec_build(path, buildm, Buildtools, buildcmd)
+				proc.wait()
+				if proc.returncode != 0:
+					raise ValueError
+
+				# if is not exist, deploy_images directory
+				if not os.path.isdir(currdir + deploy_images):
+					os.system('mkdir ' + currdir + deploy_images)
+
+				if os.path.isdir(currdir + tcc8050_main_deploy + '/images/tcc8050-main'):
+					if not os.path.isdir(currdir + deploy_images + '/tcc8050-main'):   
+						os.system('mkdir ' + currdir + deploy_images + '/tcc8050-main')
+					os.system('ln -sf ' + currdir + tcc8050_main_deploy + '/images/tcc8050-main/ca72_bl3.rom ' + '.' + deploy_images + '/tcc8050-main/ca72_bl3.rom')
+					os.system('ln -sf ' + currdir + tcc8050_main_deploy + '/images/tcc8050-main/tc-boot-tcc8050-main.img ' + '.' + deploy_images + '/tcc8050-main/tc-boot-tcc8050-main.img')
+					os.system('ln -sf ' + currdir + tcc8050_main_deploy + '/images/tcc8050-main/automotive-linux-platform-image-tcc8050-main.ext4 ' + '.' + deploy_images + '/tcc8050-main/automotive-linux-platform-image-tcc8050-main.ext4')
+					os.system('ln -sf ' + currdir + tcc8050_main_deploy + '/images/tcc8050-main/tcc8050-linux-ivi-tost_sv0.1.dtb ' + '.' + deploy_images + '/tcc8050-main/tcc8050-linux-ivi-tost_sv0.1.dtb')
+					os.system('ln -sf ' + currdir + tcc8050_main_deploy + '/home-directory.ext4 ' + '.' + deploy_images + '/home-directory.ext4')
+
+				if os.path.isdir(currdir + '/boot-firmware/prebuilt'):
+					os.system('ln -sf ' + currdir + '/boot-firmware/prebuilt ' + '.' + deploy_images + '/boot-firmware')
+		
+				print(colors.BOLD+buildcmd+" building on "+buildm+colors.ENDC)
+				print("================================================================================="+colors.OKGREEN)
+				print('Built Path : '+path+'/build/'+buildm)
+				print(colors.ENDC+"=================================================================================")
+				sys.exit(0)
+			except ValueError:
+				print(colors.FAIL+"autolinux shutdown"+colors.ENDC+" : "+colors.RED+"build command failed"+colors.ENDC)
+				sys.exit(1)
+			except KeyboardInterrupt:
+				os.kill(proc.pid, signal.SIGKILL)
+				subprocess.Popen(['stty', 'sane']).wait()
+				print(colors.FAIL+"autolinux shutdown"+colors.ENDC+" : "+colors.RED+"KeyboardInterrupt"+colors.ENDC)
+				sys.exit(1)
+		elif cmd[1] == 'sub':
+			subm = check_subcore(mach, features.getEnableFeatureList(core))
+			if not subm == '':
+				buildm = subm
+				if len(cmd) == 2:
+					buildcmd = 'telechips-subcore-image'
+				else:
+					buildcmd = " ".join(cmd[2:])
+			else:
+				print(colors.WARNING+"with-subcore is unactivated"+colors.ENDC)
+				print(colors.WARNING+"with-subcore is a unique option for the main-core"+colors.ENDC)
+				sys.exit(1)
+			try:
+				proc = exec_build(path, buildm, Buildtools, buildcmd)
+				proc.wait()
+				if proc.returncode != 0:
+					raise ValueError
+
+				# if is not exist, deploy_images directory
+				if not os.path.isdir(currdir + deploy_images):
+					os.system('mkdir ' + currdir + deploy_images)
+
+				if os.path.isdir(currdir + tcc8050_sub_deploy + '/images/tcc8050-sub'):
+					if not os.path.isdir(currdir + deploy_images + '/tcc8050-sub'):
+						os.system('mkdir ' + currdir + deploy_images + '/tcc8050-sub')
+					os.system('ln -sf ' + currdir + tcc8050_sub_deploy + '/images/tcc8050-sub/ca53_bl3.rom ' + '.' + deploy_images + '/tcc8050-sub/ca53_bl3.rom')
+					os.system('ln -sf ' + currdir + tcc8050_sub_deploy + '/images/tcc8050-sub/tc-boot-tcc8050-sub.img ' + '.' + deploy_images + '/tcc8050-sub/tc-boot-tcc8050-sub.img')
+					os.system('ln -sf ' + currdir + tcc8050_sub_deploy + '/images/tcc8050-sub/telechips-subcore-image-tcc8050-sub.ext4 ' + '.' + deploy_images + '/tcc8050-sub/telechips-subcore-image-tcc8050-sub.ext4')
+					os.system('ln -sf ' + currdir + tcc8050_sub_deploy + '/images/tcc8050-sub/tcc8050-linux-subcore-ivi-tost_sv0.1.dtb ' + '.' + deploy_images + '/tcc8050-sub/tcc8050-linux-subcore-ivi-tost_sv0.1.dtb')
+
+				if os.path.isdir(currdir + '/boot-firmware/prebuilt'):
+					os.system('ln -sf ' + currdir + '/boot-firmware/prebuilt ' + '.' + deploy_images + '/boot-firmware')
+ 
+				print(colors.BOLD+buildcmd+" building on "+buildm+colors.ENDC)
+				print("================================================================================="+colors.OKGREEN)
+				print('Built Path : '+path+'/build/'+buildm)
+				print(colors.ENDC+"=================================================================================")
+				sys.exit(0)
+			except ValueError:
+				print(colors.FAIL+"autolinux shutdown"+colors.ENDC+" : "+colors.RED+"build command failed"+colors.ENDC)
+				sys.exit(1)
+			except KeyboardInterrupt:
+				os.kill(proc.pid, signal.SIGKILL)
+				subprocess.Popen(['stty', 'sane']).wait()
+				print(colors.FAIL+"autolinux shutdown"+colors.ENDC+" : "+colors.RED+"KeyboardInterrupt"+colors.ENDC)
+				sys.exit(1)
+		elif cmd[1] == 'cr5':
+			subm = check_subcore(mach, features.getEnableFeatureList(core))
+			if not subm == '':
+				if len(cmd) == 2:
+					buildcmd = ''
+				else:
+					buildcmd = " ".join(cmd[2])
+			else:
+				print(colors.WARNING+"with-subcore is unactivated"+colors.ENDC)
+				print(colors.WARNING+"with-subcore is a unique option for the main-core"+colors.ENDC)
+				sys.exit(1)
+			try:
+				proc = exec_build_cr5(path, buildcmd)
+				proc.wait()
+				if proc.returncode != 0:
+					raise ValueError
+				print(colors.BOLD+" building on "+subm+colors.ENDC)
+				print("================================================================================="+colors.OKGREEN)
+				print('Built Path : '+path+tcc8050_mcu_deploy)
+				print(colors.ENDC+"=================================================================================")
+	
+ 				# make SNOR image
+				if os.path.isfile(currdir + '/boot-firmware/tools/snor_mkimage/mkrom.sh'):
+					os.system('./boot-firmware/tools/snor_mkimage/mkrom.sh')
+     
+					if not os.path.isdir(currdir + deploy_images):
+						os.system('mkdir ' + currdir + deploy_images)
+
+					if os.path.isdir(currdir + tcc8050_mcu_deploy):
+						os.system('ln -sf ' + currdir + tcc8050_mcu_deploy + '/cr5_snor.rom ' + '.' + deploy_images + '/cr5_snor.rom')
+
+					if os.path.isdir(currdir + '/boot-firmware/prebuilt'):
+						os.system('ln -sf ' + currdir + '/boot-firmware/prebuilt ' + '.' + deploy_images + '/boot-firmware')
+
+				sys.exit(0)
+			except ValueError:
+				print(colors.FAIL+"autolinux shutdown"+colors.ENDC+" : "+colors.RED+"build command failed"+colors.ENDC)
+				sys.exit(1)
+			except KeyboardInterrupt:
+				os.kill(proc.pid, signal.SIGKILL)
+				subprocess.Popen(['stty', 'sane']).wait()
+				print(colors.FAIL+"autolinux shutdown"+colors.ENDC+" : "+colors.RED+"KeyboardInterrupt"+colors.ENDC)
+				sys.exit(1)
+		else:
+			buildcmd = " ".join(cmd[1:])
+			subm = ''
+
+	try:
+		debug(buildcmd, IMGS, core)
+		if buildcmd in IMGS:
+			modify_config_history('image', buildcmd)
+			# with-subcore
+			subm = check_subcore(mach, features.getEnableFeatureList(core))
+			if not subm == '':
+				debug(path, subm, Buildtools, 'telechips-subcore-image', False)
+				tsub = multiprocessing.Process(target=exec_build, args=(path, subm, Buildtools, 'telechips-subcore-image', False))
+				print('Enabled with-subcore, The autolinux script build Sub-core Image automatically in background')
+				tsub.start()
+
+			# with-cr5core
+			cr5m = check_cr5core(mach, features.getEnableFeatureList(core))
+			if not cr5m == '':
+				cr5m = multiprocessing.Process(target=exec_build_cr5, args=(path, '', False))
+				print('Enabled with-cr5, The autolinux script build cr5-core Image automatically in background')
+				cr5m.start()
+
+			# tcc8050-main
+			proc = exec_build(path, mach, Buildtools,  buildcmd)
+			proc.wait()
+			if proc.returncode != 0:
+				raise ValueError
+
+			print("================================================================================="+colors.OKGREEN)
+			print('Built Images Path :')
+			print('CA72 : '+path+'/build/'+mach+'/tmp/deploy/images/'+mach)
+			if not subm == '':
+				print('CA53 : '+path+'/build/'+subm+'/tmp/deploy/images/'+subm)
+			if not cr5m == '':
+				print('CR5  : '+path+ tcc8050_mcu_deploy)
+			print(colors.ENDC+"=================================================================================")
+
+			if not subm == '' and tsub.is_alive():
+				print(('Building '+subm+'...'))
+				tsub.join()
+		else:
+			print(colors.BOLD+buildcmd+" building on "+mach+colors.ENDC)
+			proc = exec_build(path, mach, Buildtools,  buildcmd)
+			proc.wait()
+			if proc.returncode != 0:
+				raise ValueError
+
+	except ValueError:
+		print(colors.FAIL+"autolinux shutdown"+colors.ENDC+" : "+colors.RED+"build command failed"+colors.ENDC)
+		sys.exit(1)
+	except KeyboardInterrupt:
+		if not subm == '':
+			os.kill(tsub.pid, signal.SIGKILL)
+		os.kill(proc.pid, signal.SIGKILL)
+		subprocess.Popen(['stty', 'sane']).wait()
+		print(colors.FAIL+"autolinux shutdown"+colors.ENDC+" : "+colors.RED+"KeyboardInterrupt"+colors.ENDC)
+		sys.exit(1)
+
+def command_modify(cmd, path, mach, core, sdk, bv, features, image):
+	debug(cmd, path, mach, core, sdk, bv, features, image)
+	if cmd == 'feature':
+		debug("")
+		sel_feature(mach, features, core)
+		modify_config_history('feature', features.getEnableFeatureList(core))
+		subm = check_subcore(mach, features.getEnableFeatureList(core))
+		if subm:
+			debug("")
+			sel_feature(subm, features, 'sub')
+			modify_config_history('subfeature', features.getEnableFeatureList('sub'))
+			modify_config_history('feature', features.getEnableFeatureList(core))
+		ret = True
+	elif cmd == 'sub-feature':
+		subm = check_subcore(mach, features.getEnableFeatureList(core))
+		if subm:
+			debug("")
+			sel_feature(subm, features, 'sub')
+			modify_config_history('subfeature', features.getEnableFeatureList('sub'))
+			modify_config_history('feature', features.getEnableFeatureList(core))
+			ret = True
+		else:
+			print ("This device has not sub-core")
+			ret = False
+	elif cmd == 'image':
+		ci = sel_image(path, mach, sdk)
+		modify_config_history('image', ci)
+		image = ci
+		ret = True
+	elif cmd == 'version':
+		cv = sel_buildversion()
+		modify_config_history('buildver', cv)
+		bv = cv
+		ret = True
+	else:
+		ret = False
+	if ret:
+		if not os.path.isdir(os.path.join(path+'/build/'+mach+'/conf')):
+			mk_builddir(path, mach, bv, Buildtools)
+		subm = modify_confs(path, mach, features, bv, sdk)
+		if subm:
+			if not os.path.isdir(os.path.join(path+'/build/'+subm+'/conf')):
+				mk_builddir(path, subm, bv, Buildtools)
+			modify_confs(path, subm, features, bv, sdk)
+			print_config_info(path, True)
+		else:
+			print_config_info(path, False)
+		print (colors.OKGREEN+"Modify {0} Successful".format(cmd)+colors.ENDC)
+	else:
+		print(colors.FAIL+'This modify argument is invalid'+colors.ENDC)
+def command_configure(cmd, path, mach, sdk, bv, features):
+	if os.path.isdir(os.path.join(path+'/build/'+mach+'/conf')):
+		shutil.rmtree(path+'/build/'+mach+'/conf')
+
+	mk_builddir(path, mach, bv, Buildtools)
+	debug("")
+	subm = modify_confs(path, mach, features, bv, sdk)
+	debug("subm", subm)
+
+	if not subm == '':
+		if os.path.isdir(os.path.join(path+'/build/'+subm+'/conf')):
+			shutil.rmtree(path+'/build/'+subm+'/conf')
+		mk_builddir(path, subm, bv, Buildtools)
+		print('Enabled with-subcore, The autolinux script make new configuration files of Sub-core automatically')
+		modify_confs(path, subm, features, bv, sdk)
+		print_config_info(path, True)
+	else:
+		print_config_info(path, False)
+
+	debug("cmd", cmd)
+	if 'save' in cmd:
+		if len(cmd) < 3:
+			save_machconfig(currdir, mach)
+		else:
+			save_machconfig(currdir, cmd[2])
+
+if __name__ == '__main__':
+	srcdir = os.path.abspath(os.path.dirname(sys.argv[0]))
+	currdir = os.getcwd()
+	read_config(srcdir)
+	options = getopt()
+	check_buildtool_env()
+	new = check_oldconfig(currdir, options)
+	debug(new)
+	startTime = datetime.now()
+
+	#set 
+	#git config --global http.sslVerify false
+	#export GIT_SSL_NO_VERIFY=0
+
+	if 'clean' in options.command:
+		command_clean(options.command , currdir)
+		sys.exit(0)
+
+	if new:
+		sdk, manifest, mach, bv, features = setup_configuration(options, currdir)
+	else:
+		sdk, manifest, mach, bv, features, image  = read_config_history('autolinux.config', currdir)
+		chipset = mach[0:6]+'x'
+		debug(sdk, manifest, mach, bv, features, image)
+		if len(mach.split('-')) > 1 :
+			core = mach.split('-')[1]
+		else:
+			core = ''
+		debug(core)
+
+	setup_environment(currdir, sdk, manifest)
+
+	if 'info' in options.command:
+		subm = check_subcore(mach, features.getEnableFeatureList(core))
+		if subm:
+			print_config_info(currdir, True)
+		else:
+			print_config_info(currdir, False)
+		sys.exit(0)
+
+	if 'configure' in options.command:
+		command_configure(options.command, currdir, mach, sdk, bv, features)
+
+	elif 'modify' in options.command:
+		command_modify(options.command[1], currdir, mach, core, sdk, bv, features, image)
+
+	elif 'build' in options.command:
+		debug(options.command, currdir, mach, sdk, image)
+		command_build(options.command, currdir, mach, sdk, image)
+
+	elif 'devtool' in options.command:
+		if len(options.command) < 2:
+			print(colors.WARNING+'devtool command is null!'+colors.ENDC)
+			sys.exit(1)
+		else:
+			devtoolcmd = " ".join(options.command[1:])
+			exec_devtool(currdir, mach, Buildtools, devtoolcmd)
+
+	elif 'make_fai' in options.command:
+		debug(image)
+		if image:
+			try:
+				proc = exec_build(currdir, mach, Buildtools, image + ' -f -c ' + "".join(options.command))
+				proc.wait()
+				if proc.returncode != 0:
+					raise ValueError
+
+				# make SNOR image
+				if os.path.isfile(currdir + '/boot-firmware/tools/snor_mkimage/mkrom.sh'):
+					os.system('./boot-firmware/tools/snor_mkimage/mkrom.sh')
+
+				# FWDN tool path       
+				if os.path.isdir(currdir + deploy_images):
+					os.system('rm -rf ' + currdir + deploy_images)
+				
+				os.system('mkdir ' + currdir + deploy_images)
+    
+				print("\nFWDN Path : ====================================================================="+colors.OKGREEN)
+
+				if os.path.isdir(currdir + tcc8050_main_deploy + '/fwdn'):
+					os.system('ln -sf ' + currdir + tcc8050_main_deploy + '/fwdn/SD_Data.fai ' + '.' + deploy_images + '/SD_Data.fai')
+					os.system('ln -sf ' + currdir + tcc8050_main_deploy + '/fwdn/partition.list ' + '.' + deploy_images + '/partition.list')
+					print(currdir + deploy_images + '/SD_Data.fai')
+
+				if os.path.isdir(currdir + tcc8050_mcu_deploy):
+					os.system('ln -sf ' + currdir + tcc8050_mcu_deploy + '/cr5_snor.rom ' + '.' + deploy_images + '/cr5_snor.rom')
+					print(currdir + deploy_images + '/cr5_snor.rom')
+
+				if os.path.isdir(currdir + tcc8050_main_deploy + '/images/tcc8050-main'):
+					os.system('mkdir ' + currdir + deploy_images + '/tcc8050-main')
+					os.system('ln -sf ' + currdir + tcc8050_main_deploy + '/images/tcc8050-main/ca72_bl3.rom ' + '.' + deploy_images + '/tcc8050-main/ca72_bl3.rom')
+					os.system('ln -sf ' + currdir + tcc8050_main_deploy + '/images/tcc8050-main/tc-boot-tcc8050-main.img ' + '.' + deploy_images + '/tcc8050-main/tc-boot-tcc8050-main.img')
+					os.system('ln -sf ' + currdir + tcc8050_main_deploy + '/images/tcc8050-main/automotive-linux-platform-image-tcc8050-main.ext4 ' + '.' + deploy_images + '/tcc8050-main/automotive-linux-platform-image-tcc8050-main.ext4')
+					os.system('ln -sf ' + currdir + tcc8050_main_deploy + '/images/tcc8050-main/tcc8050-linux-ivi-tost_sv0.1.dtb ' + '.' + deploy_images + '/tcc8050-main/tcc8050-linux-ivi-tost_sv0.1.dtb')
+					os.system('ln -sf ' + currdir + tcc8050_main_deploy + '/home-directory.ext4 ' + '.' + deploy_images + '/home-directory.ext4')
+					print(currdir + deploy_images + '/tcc8050-main/')
+    
+				if os.path.isdir(currdir + tcc8050_sub_deploy + '/images/tcc8050-sub'):	       
+					os.system('mkdir ' + currdir + deploy_images + '/tcc8050-sub')
+					os.system('ln -sf ' + currdir + tcc8050_sub_deploy + '/images/tcc8050-sub/ca53_bl3.rom ' + '.' + deploy_images + '/tcc8050-sub/ca53_bl3.rom')
+					os.system('ln -sf ' + currdir + tcc8050_sub_deploy + '/images/tcc8050-sub/tc-boot-tcc8050-sub.img ' + '.' + deploy_images + '/tcc8050-sub/tc-boot-tcc8050-sub.img')
+					os.system('ln -sf ' + currdir + tcc8050_sub_deploy + '/images/tcc8050-sub/telechips-subcore-image-tcc8050-sub.ext4 ' + '.' + deploy_images + '/tcc8050-sub/telechips-subcore-image-tcc8050-sub.ext4')
+					os.system('ln -sf ' + currdir + tcc8050_sub_deploy + '/images/tcc8050-sub/tcc8050-linux-subcore-ivi-tost_sv0.1.dtb ' + '.' + deploy_images + '/tcc8050-sub/tcc8050-linux-subcore-ivi-tost_sv0.1.dtb')
+					print(currdir + deploy_images + '/tcc8050-sub/')
+
+				if os.path.isdir(currdir + tcc8050_main_deploy + '/images/tcc8050-main/boot-firmware'):	         
+					os.system('ln -sf ' + currdir + tcc8050_main_deploy + '/images/tcc8050-main/boot-firmware ' + '.' + deploy_images + '/boot-firmware')
+					print(currdir + deploy_images + '/boot-firmware/')
+
+				print(colors.ENDC+"=================================================================================")
+
+			except ValueError:
+				print(colors.FAIL+"autolinux shutdown"+colors.ENDC+" : "+colors.RED+"make_fai command failed"+colors.ENDC)
+				sys.exit(1)
+			except KeyboardInterrupt:
+				os.kill(proc.pid, signal.SIGKILL)
+				subprocess.Popen(['stty', 'sane']).wait()
+				sys.exit(0)
+		else:
+			print('The previously build image is None\n')
+			print(colors.RED+'make_fai only supported with predefined IMAGE'+colors.ENDC)
+
+	elif 'fwdn' in options.command:
+		debug(options.command)
+		if os.path.isdir(currdir + '/boot-firmware/tools/fwdn'):
+			print("================================================================================="+colors.OKGREEN)
+			pushdir('./boot-firmware/tools/fwdn')
+			if 'ufs' in features.getEnableFeatureList(core):
+				os.system('./fwdn.sh ufs')
+			else:
+				os.system('./fwdn.sh eMMC')
+			popdir()
+		else:
+			print(colors.FAIL+'This command is invalid'+colors.ENDC)
+	else:
+		print(colors.FAIL+'This command is invalid'+colors.ENDC)
+	
+	#elapaed time
+	endTime = datetime.now()
+	print(f"Time taken in {endTime - startTime}")
